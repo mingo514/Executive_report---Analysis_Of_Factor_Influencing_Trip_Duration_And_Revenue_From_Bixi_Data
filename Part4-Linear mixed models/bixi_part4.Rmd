@@ -1,0 +1,876 @@
+---
+title: "Part 4: Linear Mixed Models"
+author: "Charles Julien, Chike Odenigbo, Atul Sharma, Gabriel Jobert"
+date: "10/20/2023"
+geometry: "left=2cm,right=2cm,top=1cm,bottom=1.2cm"
+output:
+  pdf_document:
+    toc: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = FALSE, warning=FALSE, include = FALSE, echo=FALSE}
+# Import (The fewer the better)
+library(nlme)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(leaflet)
+library(gridExtra)
+library(broom)
+library(stats)
+library(car)
+library(janitor)
+library(tibble)
+
+library(nlme)
+library(lmtest)
+library(lme4)
+#install.packages("sf")
+library(sf)
+#install.packages("lmerTest")
+library(lmerTest)
+```
+
+```{r wd, include=FALSE}
+# Set working directory to file location
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+```{r load_data, include=FALSE}
+# Data loading
+
+
+df_raw = read.csv("./../src/bixi10.csv")
+df_station = read.csv("./../src/2021_stations.csv")
+
+
+bixi_stations_sf <- st_as_sf(df_station, coords = c("longitude", "latitude"), crs = 4326)
+
+districts <- st_read("./../src/data_district.geojson")
+
+crs_bixi_stations <- st_crs(bixi_stations_sf)
+crs_districts <- st_crs(districts)
+
+# Print CRS for inspection
+print(crs_bixi_stations)
+print(crs_districts)
+
+# If the CRS do not match, transform one of them
+# For example, if you want to transform the CRS of bixi_stations_sf to match districts:
+if (crs_bixi_stations != crs_districts) {
+  bixi_stations_sf <- st_transform(bixi_stations_sf, crs_districts)
+}
+
+# After ensuring both dataframes have the same CRS, perform the spatial join
+stations_with_district <- st_join(bixi_stations_sf, districts)
+
+# Perform a spatial join
+# Add the district name as a new column
+df_station$district <- stations_with_district$NOM
+
+
+
+ids_to_update <- c('527', '528', '529', '530', '531', '703', '704', '705', '706', '856', '862', '944', '945', '1060', '1065', '1085', '1086', '1126', '1136') 
+districts_to_assign <- c('Longueuil', 'Longueuil', 'Longueuil', 'Longueuil', 'Longueuil', 'Laval', 'Laval', 'Laval', 'Laval', 'Ville-Marie', 'Longueuil', 'Laval', 'Laval', 'Laval', 'Laval', 'Laval', 'Laval', 'Laval', 'Laval') 
+
+for (i in seq_along(ids_to_update)) {
+  row_index <- which(df_station$pk == ids_to_update[i])
+  df_station$district[row_index] <- districts_to_assign[i]
+}
+
+df_station$district = as.factor(df_station$district)
+
+df_main = left_join(df_raw,df_station,by = c("station"="pk"))
+
+```
+
+```{r echo=FALSE}
+# Data preparation and feature engineering
+
+
+# Note: Correlation between rev and dur is very high 0.994467
+df_main$rev[is.na(df_main$rev)] <- df_main$n_tot[is.na(df_main$rev)] * 1.25 + df_main$dur[is.na(df_main$rev)] * 15
+
+
+df_main <- df_main %>% dplyr::mutate(
+              holiday = factor(holiday),
+              mem = factor(mem),
+              mm = factor(mm),
+              station = factor(station),
+              
+              wday_ordered = factor(wday, levels = c("Monday", "Tuesday", "Wednesday",  "Thursday", "Friday", "Saturday", "Sunday"),ordered = TRUE),
+              season = ifelse((mm %in% c(12,1,2)), 'Winter',
+                       ifelse((mm %in% c(3,4,5)), 'Spring',
+                       ifelse((mm %in% c(6,7,8)), 'Summer',
+                       ifelse((mm %in% c(9,10,11)), 'Fall','No Season')))),
+              
+              rain_ind = factor(ifelse((rain != 0), 'Rain', 'NoRain')),
+              
+
+              # Compared to Parc Lafontaine 
+              cardinality = factor(
+              ifelse(latitude > 45.5271 & longitude > -73.5705, 'North-East',
+                ifelse(latitude > 45.5271 & longitude <= -73.5705, 'North-West',
+                  ifelse(latitude <= 45.5271 & longitude > -73.5705, 'South-East',
+                         'South-West')
+                                    )
+                                  )
+                                ),
+              
+              
+              Metro_ind = factor(ifelse(grepl("Métro", name),1,0)),
+              
+              am_pm_ind = ifelse(n_AM>=n_PM, 'AM','PM'),
+              
+              wknd_ind = factor(ifelse((wday %in% c("Sunday","Saturday")), 'Weekend'
+                        ,'Weekday')),
+                
+
+              long_wknd_ind = factor(ifelse((wday %in% c("Sunday","Saturday")),'Weekend'
+              ,ifelse((wday %in% c("Friday","Monday") & holiday=='1'),'Long Weekend','Weekday'))),
+              
+              percent_AM = n_AM/n_tot,
+              percent_PM = n_PM/n_tot,
+        
+              year = 2021 ,
+              
+              date = as.Date(paste(year,mm,dd,sep="/")),
+              
+              week_num = as.numeric(strftime(date, format = "%V")))
+ 
+
+
+
+df_main =df_main[order(df_main$date),]
+
+
+```
+
+
+
+# Introduction
+
+**Enhancing Urban Mobility Through Advanced Analytics: Unraveling
+Patterns in BIXI Data**
+
+BIXI, the public cycling service, has emerged as a pivotal player in
+urban transportation, offering an accessible and eco-friendly mode of
+transportation that has reshaped urban mobility. Our commitment to
+understanding and improving urban transportation systems has led our
+consultant team to conduct an extensive analysis of BIXI's operational
+data.
+
+This report builds upon our previous exploration of BIXI's data,
+focusing on the application of linear mixed models to uncover nuanced
+insights. Our objective is to provide a comprehensive analysis of
+factors influencing BIXI's performance, extending our investigation to
+three specific research questions (RQs). These RQs delve into the impact
+of meteorological conditions, temporal patterns, and user
+classifications on BIXI's revenue generation.
+
+In this journey, we leverage advanced statistical techniques,
+particularly linear mixed models, to unravel complex relationships
+within the dataset. R, a powerful statistical tool, serves as our
+primary instrument for data analysis and modeling. Our findings aim to
+not only deepen the understanding of BIXI's dynamics but also provide
+actionable insights for enhancing operational efficiency.
+
+The central RQs explored in this report include the assessment of the
+seasonal impact on revenue, understanding the temporal patterns
+affecting trip duration, and examining the influence of user
+classifications on BIXI's performance. By addressing these questions, we
+aim to contribute valuable insights that can inform strategic
+decision-making for BIXI and serve as a reference for urban planners,
+researchers, and policymakers committed to creating sustainable and
+enjoyable urban environments.
+
+The subsequent sections of this report will delve into the methodologies
+employed, share the findings derived from our analysis, and offer
+recommendations to support BIXI in continually improving its services.
+
+# Business/Research questions
+
+-   Research Question 1: How do seasonal factors impact trip revenue for
+    BIXI Montréal?
+-   Research Question 2: How do daily and weekly patterns impact trip
+    durations for BIXI Montréal?
+-   Research Question 3: What variables impact the average bixi trip
+    duration?
+
+
+Before jumping in, let's perform a quick exploration of our data.
+```{r}
+df_explore = df_main %>%
+  group_by(station, mem) %>%
+  summarize(n = n())
+  
+summary(df_explore$n)
+```
+The unique identifier of a line in our dataset is a combination of the station, the date and the membership status. On average, a station for a given membership status appears 6 times in our dataset.
+
+# Research Question 1: How do seasonal factors impact trip revenue for BIXI Montréal?
+
+**Objective of Analysis:** The goal is to
+examine the impact of the month (`mm`), average daily temperature
+(`temp`), total amount of rainfall (`rain`) and membership (`mem`)
+on the revenue (`rev`) generated by trips leaving from a specified
+station.
+
+**Methodology:** We will be building different types of linear mixed models varying by correlation structure as well as random effects and assessing the estimates generated by the model performing the best according to information criteria metrics. 
+
+## Models
+
+```{r Seasonal_effect_revenue, echo=TRUE}
+# Base Linear Model
+seasonal_effect_rev_model <- lm(rev ~ mm + temp + rain + mem, data = df_main)
+
+# Compound Symmetric Model
+seasonal_effect_rev_gls <- gls(rev ~ temp + rain + mm + mem, correlation = corCompSymm(form = ~ 1 | station), data = df_main)
+
+# Autoregressive Model
+seasonal_effect_rev.ar <- gls(rev ~ temp + rain + mm + mem, correlation = corAR1(form = ~ 1 | station), data = df_main)
+
+# Random Intercept Model
+seasonal_effect_rev.rand_int <- lme(rev ~ temp + rain + mm + mem, random = ~ 1 | station, data = df_main)
+
+# Random Effect on Temperature Variable Model
+seasonal_effect_rev.rand_coef <- lme(rev ~ temp + rain + mm + mem, random = ~1 + temp |
+station, data = df_main)
+
+# Autoregressive + Random Intercept Model 
+seasonal_effect_rev.ar_rand_int <- lme(rev ~ temp + rain + mm + mem, random = ~1 |
+station, correlation = corAR1(form = ~1 | station), data = df_main)
+
+```
+
+
+```{r, echo=FALSE}
+summary_season_rev.base = tidy(seasonal_effect_rev_model)
+colnames(summary_season_rev.base) <- c('Covariates','Value','Std.Error','t-value','p-value')
+summary_season_rev.base$type = 'Base'
+```
+
+
+```{r, echo=FALSE}
+summary_season_rev.ar = as.data.frame(summary(seasonal_effect_rev.ar)$tTable)
+summary_season_rev.ar$type = 'Autoregr.'
+#summary_season_rev.ar[,c('DF')] <- NA
+summary_season_rev.ar = tibble::rownames_to_column(summary_season_rev.ar, "Covariates")
+
+summary_season_rev.rand_int = as.data.frame(summary(seasonal_effect_rev.rand_int)$tTable)
+summary_season_rev.rand_int$type = 'Random Intercept'
+summary_season_rev.rand_int = tibble::rownames_to_column(summary_season_rev.rand_int, "Covariates")
+
+summary_season_rev.ar_rand_int = as.data.frame(summary(seasonal_effect_rev.ar_rand_int)$tTable)
+summary_season_rev.ar_rand_int$type = 'Autoregr. Random Intercept'
+summary_season_rev.ar_rand_int  = tibble::rownames_to_column(summary_season_rev.ar_rand_int, "Covariates")
+
+
+summary_season_rev.rand_coef = as.data.frame(summary(seasonal_effect_rev.rand_coef)$tTable)
+summary_season_rev.rand_coef$type = 'Random Slope'
+summary_season_rev.rand_coef = tibble::rownames_to_column(summary_season_rev.rand_coef, "Covariates")
+
+
+cols = intersect(colnames(summary_season_rev.rand_coef),colnames(summary_season_rev.ar))
+cols = intersect(colnames(summary_season_rev.rand_int),cols)
+cols = intersect(colnames(summary_season_rev.rand_coef),cols)
+
+season_summary_combined = rbind(summary_season_rev.rand_coef[, cols], summary_season_rev.ar_rand_int[, cols],summary_season_rev.rand_int[, cols],summary_season_rev.ar[, cols],summary_season_rev.base[, cols])
+season_summary_combined$significance <- ifelse(season_summary_combined$`p-value`<0.05, 'Significant Feature', 'Not Significant')
+#season_summary_combined
+```
+Using a 5% significance threshold, we can conclude that across the 5 models tested, each of the covariates used to predict revenue had a significant impact.
+```{r}
+knitr::kable(season_summary_combined %>%
+  group_by(Covariates) %>%
+  summarise(Significant = sum(significance == "Significant Feature"),
+            `Not Significant` = sum(significance == "Not Significant")),caption = 'Feature Significance (5%)')
+```
+
+The Model estimates are similar despite different correlation structures. In this sense, we can see that the size and direction of each covariate is similar across each model.
+
+```{r}
+ggplot(season_summary_combined, aes(fill=type, y=Value, x=Covariates)) + 
+  geom_bar(colour="black",position='dodge', stat='identity')  + ggtitle ("Effect of LMMs on Coefficients") + theme_minimal () + theme(legend.position="bottom")
+```
+
+### Interpretation
+
+**Intercept:**  This is the average revenue when all values are set at 0. In our case, it would be that for non members, in the month of April, with no rain and temperature at 0 degrees, the expected revenue is roughly -($2,500) across all the models. This number is unrealistic as Bixi revenue is a strictly positive number. It would have been more interpretable if revenue was allowed to be a negative number by accounting for cost.
+
+**mem1:**  Members contribute roughly $6,000 in additional revenue for a given station compared to non-members holding other variables constant.
+
+**mm5:** Rides in the month of May contribute about $1,200 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**mm6:** Rides in the month of June contribute about $1,250 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**mm7:** Rides in the month of July contribute about $1,280 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**mm8:** Rides in the month of August contribute about $1,250 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**mm9:** Rides in the month of May contribute about $2,200 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**mm10:** Rides in the month of May contribute about $1,000 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**mm11:** Rides in the month of May contribute about $700 in additional revenue for a given station compared to the month of April holding all other variables constant.
+
+**rain:** A 1 unit increase in rain contributes to a $100 decrease in revenue for a given station holding all other variables constant.
+
+**temp:** A 1 unit increase in temperature contributes to a $100 increase in revenue for a given station holding all other variables constant.
+
+### Business Implications:
+
+**Temperature**: Bixi can capitalize on warmer temperatures by promoting
+increased ridership during favorable weather conditions.
+
+**Rainfall**: Strategies to mitigate the negative impact of rainfall on
+revenue may include targeted marketing during rainy periods or offering
+promotions to incentivize usage.
+
+**Seasonal Variation**: Understanding the seasonal variation allows Bixi
+to allocate resources effectively, focusing on peak months like July,
+August, and September for marketing and service enhancements.
+
+**Month-specific Strategies**: Tailoring marketing campaigns or
+promotional offers based on the impact of each month on revenue can
+optimize Bixi's overall financial performance.
+
+**Planning and Resource Allocation**: Knowledge of specific months with
+higher revenue can guide resource allocation, such as increasing bike
+availability and marketing efforts during peak months.
+
+**Operational Adjustments**: Bixi can make operational adjustments, such
+as increasing staff or bikes, during months with the most significant
+positive impact on revenue.
+
+### Model Performance
+
+Using AIC and BIC metrics, the model incorporating a random slope as well as the model incorporating an autoregressive correlation structure with a random intercept perform best when predicting revenue using season, membership and period data. This was assessed by the fact that they both have the lowest BIC and AIC metrics of all the models considered. It is also worth noting that the basic linear model that does not account for autocorrelation in the data fits the data the least optimally. 
+
+```{r, echo=FALSE}
+performance.df <- data.frame("Type"=numeric(),"AIC"=numeric(),"BIC"=numeric(),"LL"=numeric())  
+performance.df[nrow(performance.df) + 1,] = c("Base",AIC(seasonal_effect_rev_model),BIC(seasonal_effect_rev_model),logLik(seasonal_effect_rev_model))
+
+performance.df[nrow(performance.df) + 1,] = c("Autoregressive",AIC(seasonal_effect_rev.ar),BIC(seasonal_effect_rev.ar),logLik(seasonal_effect_rev.ar))
+
+performance.df[nrow(performance.df) + 1,] = c("Autoregressive Random Intercept",AIC(seasonal_effect_rev.ar_rand_int),BIC(seasonal_effect_rev.ar_rand_int),logLik(seasonal_effect_rev.ar_rand_int))
+
+performance.df[nrow(performance.df) + 1,] = c("Random Intercept",AIC(seasonal_effect_rev.rand_int),BIC(seasonal_effect_rev.rand_int),logLik(seasonal_effect_rev.rand_int))
+
+performance.df[nrow(performance.df) + 1,] = c("Random Slope",AIC(seasonal_effect_rev.rand_coef),BIC(seasonal_effect_rev.rand_coef),logLik(seasonal_effect_rev.rand_coef))
+
+knitr::kable(performance.df %>% arrange(BIC),caption='Model Performance')
+```
+
+To confirm our finding that the random effects model performs better than the basic linear regression model, we conducted a likelihood ratio test between the linear mixed model and the base linear model. The goal is to assess whether the full model fits the data significantly better than the nested model. In our analysis, the nested model consisted simply of the linear model and the full model was the random coefficient on temperature model which accounted for the base model as well as the addition of the coefficients of the random effects on temperature. 
+
+The analysis derived a Likelihood ratio statistic of 3270 leading to a p-value less than 0.001. We can thus conclude that the random effects model fits the data significantly better than base linear model using a 1% significance threshold. This effectively means that making changes to the model structure by accounting for group effects leads to a significant improvement in fit relative to a linear model.
+```{r}
+anova(seasonal_effect_rev.rand_coef,seasonal_effect_rev_model)
+```
+
+
+
+```{r}
+#getVarCov(seasonal_effect_rev.rand_coef, type = "random.effects")
+#summary(seasonal_effect_rev.rand_coef)
+```
+
+### Assessment of Assumptions
+
+**Normality of Residuals**: Using QQ plots, our first step was to assess the normality of the residuals comparing the champion model (Random Effects Model) with the base model (Linear Regression Model). We can see that in both cases, there is some deviation from the expected normal distribution. For the base model, the deviation takes place after the second quantile and in the case of the Random Effects model, the deviation takes place before the -2 quantile and after the +2 quantile. The slope of the deviation seems to be less steeper in the case of the random effects model. In both cases, outliers seem to be affecting the ability of the model to capture a normal distribution of the residuals though the random effects model seems to be fairer across the fitted values.
+```{r, fig.height=3, fig.width=3, echo=FALSE}
+#par(mfrow=c(1,2))
+# Extract residuals from the GLS model
+residuals.base <- residuals(seasonal_effect_rev_model)
+
+# Create a Normal Q-Q plot
+qqnorm(residuals.base, main = "Q-Q Plot for Base Model")
+qqline(residuals.base)
+
+# Extract residuals from the GLS model
+residuals.rand_coef <- residuals(seasonal_effect_rev.rand_coef)
+
+# Create a Normal Q-Q plot
+qqnorm(residuals.rand_coef, main = "Q-Q Plot for Random Slope")
+qqline(residuals.rand_coef)
+```
+**Heteroskedasticity:** Looking at the fitted values in comparison to the residuals, we can notice the existence of heteroskedasticity for both models. More specifically, we can notice that as the fitted value increases, the variance of the residuals increases as well. The random effects model seems to be much more centered to the data as the upper bound of the residuals is less than that of the base model, however its lower bound is less than the base model. Overall, accounting for influential observations and/or experimenting with various transformations to the target variable or covariates could improve the fit of the model.
+```{r, fig.height=3, fig.width=7, echo=FALSE}
+#produce residual vs. fitted plot
+par(mfrow=c(1,2))
+plot(fitted(seasonal_effect_rev_model), residuals.base, xlab="Fitted Values", ylab="Residuals")
+
+#add a horizontal line at 0 
+title('Base Model')
+abline(0,0)
+
+plot(fitted(seasonal_effect_rev.rand_coef), residuals.rand_coef, xlab="Fitted Values", ylab="Residuals")
+title('Random Effect Model')
+#add a horizontal line at 0 
+abline(0,0)
+```
+
+# Research Question 2: How do daily and weekly patterns impact trip durations for BIXI Montréal?
+
+**Objective of Analysis:** This regression model is examining the impact of the day of the month (`dd`), day of the week (`wday`), and holidays (`holiday`) on the revenue (`rev`) generated by trips leaving from a
+specified station.
+
+## Model
+
+```{r Time_pattern_trip_duration, echo=FALSE}
+time_pattern_dur_model_mixed <- lmer(dur ~ holiday + wknd_ind + wknd_ind*mem + (1|district/station), data=df_main)
+summary(time_pattern_dur_model_mixed)
+
+```
+The model explores the relationship between trip duration (`dur`) and
+factors like holidays (`holiday`), weekend indicator (`wknd_ind`),
+membership status (`mem`) and its interaction with weekend indicator,
+considering the nested structure of stations within districts.
+
+**Random Effects** - **Station:District Variability**: The significant
+variance in the random intercepts for stations within districts
+(Variance = 23,795, Std. Dev. = 154.3) suggests considerable differences
+in baseline trip durations across stations, depending on their
+district. - **District-Level Variability**: There is also notable
+variability between districts (Variance = 12,617, Std. Dev. = 112.3),
+indicating that the district a station belongs to influences trip
+duration. - These results highlight the importance of accounting for the
+hierarchical structure of the data (stations nested within districts).
+
+**Fixed Effects (Significance & Interpretation)** - **Intercept**: The
+negative intercept (-34.453) may not be meaningful by itself, as it
+represents the expected trip duration when all other variables are at
+their reference levels. In this context, an intercept of -34.453 would
+mean that when it's a non-holiday weekday, and the rider is not a
+member, the model predicts a trip duration of -34.453 units. Since
+negative trip duration is not possible, this result might initially seem
+nonsensical. - **Holiday (significant)**: On average, holding other
+variables constant, total trip durations on holidays are 51.945 minutes
+longer compared to non-holidays. This reflects a tendency for longer
+trips during holidays. This effect is statistically significant (p \<
+0.001). - **Weekend Indicator (significant)**: On average, with other
+factors held constant, total trip durations on weekends are 67.896
+minutes longer than on weekdays. This indicates a preference or tendency
+for longer trips during weekends. This is highly significant (p \<
+0.001). - **Membership Status (significant)**: Holding other variables
+at their reference levels, on average, members have a total trip
+durations that are 313.065 minutes longer compared to non-members. This
+might indicate different usage patterns, such as members taking longer
+trips., a highly significant effect (p \< 0.001). - **Interaction:
+Weekend and Membership (significant)**: On average, and with other
+variables held constant, the interaction effect suggests that the
+increased total trip duration associated with membership is reduced by
+68.763 minutes on weekends. This indicates that the distinction in trip
+duration between members and non-members is less pronounced on weekends.
+This is also statistically significant (p \< 0.001).
+
+**Correlations of Fixed Effects** - The correlation matrix shows the
+relationships between the different fixed effects in the model. High
+correlations can indicate potential multicollinearity issues, which
+might affect the interpretation of coefficients. However, in the model,
+these correlations seem relatively moderate.
+
+**Overall Interpretation** - The model indicates that both the day of
+the week (weekend vs. weekday) and membership status significantly
+impact trip durations, with an interesting interaction effect on
+weekends for members. - The significant random effects imply that both
+the specific station and the district it's in are important factors
+influencing trip durations. - The model appears to be a good fit for the
+data, capturing key variability both within and between groups (stations
+and districts).
+
+```{r}
+null_model <- lmer(dur ~ 1 + (1 | district/station), data = df_main)
+
+#Compare full model to null model (refitting using mle)
+anova(time_pattern_dur_model_mixed, null_model)
+
+```
+
+-   The significant Chi-square test (p \< 0.001) suggests that the fixed
+    effects included in the full model (related to holidays, weekends,
+    and membership status) contribute meaningfully to explaining the
+    variability in trip durations.
+-   The lower AIC and BIC values for the full model compared to the null
+    model further support that the full model provides a better fit to
+    the data.
+-   This analysis strongly indicates that the factors of holidays,
+    weekends, and membership status, along with their interactions, are
+    important predictors of trip duration in the context of the
+    bike-sharing data.
+
+## Assumptions
+
+```{r, fig.width=6, fig.height=6, echo=FALSE}
+
+par(mfrow = c(2, 2))
+# Using lmer model
+residuals <- residuals(time_pattern_dur_model_mixed)
+
+# Histogram
+hist(residuals, breaks=30, main="Histogram of Residuals")
+
+# Q-Q Plot
+qqnorm(residuals)
+qqline(residuals)
+
+plot(fitted(time_pattern_dur_model_mixed), residuals, xlab="Fitted Values", ylab="Residuals")
+abline(h=0, col="red")
+
+
+# For non-time series data
+plot(residuals, type="l")
+```
+
+
+```{r, echo=FALSE}
+# # For time series data
+# acf(residuals)
+# 
+# ranef_plot <- ranef(time_pattern_dur_model_mixed)
+# plot(ranef_plot)
+# 
+# predicted_values <- predict(time_pattern_dur_model_mixed)
+# plot(df_main$dur, predicted_values)
+# abline(0, 1)
+
+```
+
+
+**Histogram of Residuals** The histogram shows the distribution of
+residuals. It suggests that the residuals are fairly symmetrically
+distributed around zero, indicating that the assumption of normality
+might be reasonably met. However, the distribution appears slightly
+leptokurtic (having a peak higher than a normal distribution), suggested
+by the tall center of the histogram.
+
+**Normal Q-Q Plot** The Q-Q plot compares the quantiles of the residuals
+to the quantiles of a normal distribution. If the residuals were
+perfectly normally distributed, the points would lie on the 45-degree
+reference line. In the Q-Q plot, the points deviate from the line at the
+ends, indicating potential heavy tails in the distribution of residuals.
+This could suggest some departure from normality, particularly with
+potential outliers or extreme values.
+
+**Residuals vs Fitted Values Plot** The residuals should be randomly
+scattered around the horizontal line at zero, with no clear pattern. In
+the plot, there seems to be a slight "funnel" shape, where the variance
+of the residuals increases with the fitted values, which could indicate
+heteroscedasticity.
+
+**Residuals vs Index Plot** This plot displays residuals against the
+observation index. It's useful for detecting patterns that may indicate
+violation of independence. The residuals appear randomly scattered,
+suggesting no obvious violation of independence. However, there are some
+visible outliers, which should be investigated further.
+
+**ACF Plot of Residuals** The autocorrelation function (ACF) plot is
+used to check for autocorrelation in the residuals at different lags.
+The bars represent correlations at different lag values. If most of them
+are within the blue dashed lines (representing confidence intervals), it
+suggests little to no autocorrelation. The ACF plot shows that
+autocorrelation is not a concern as the correlations are within the
+bounds.
+
+**Q-Q Plot of Random Effects** This plot should show whether the random
+effects are normally distributed. The random effects (intercepts for
+`district/station` in the model) should fall along the reference line if
+they're normally distributed. There's some deviation from normality, but
+it's not extreme.
+
+**Predicted vs Actual Values Plot** This plot compares the predicted
+values from the model to the actual values. Ideally, the points should
+fall around the 45-degree line, indicating good model fit. The plot
+shows a reasonable alignment along the line, although it seems to
+diverge for higher values, suggesting the model might not predict as
+well in that range.
+
+**Interpretation Summary** The model assumptions are not strictly
+violated, but there are indications of potential issues:
+
+-   The residuals are roughly normally distributed but show signs of
+    leptokurtosis.
+-   There might be some heteroscedasticity, as indicated by the
+    Residuals vs Fitted Values plot.
+-   There are outliers in the data that could be influential points
+    worth investigating.
+-   The assumption of independence seems to be met based on the
+    Residuals vs Index and ACF plots.
+-   The random effects may slightly deviate from normality, but not
+    severely.
+
+**Limitation of the model** Given these observations, the following
+improvement could be made :
+
+-   Transforming the response variable or using robust regression
+    techniques to handle non-normality and heteroscedasticity.
+-   Investigating and potentially addressing outliers.
+
+## Business interpretation
+
+From a business perspective, the findings from this analysis offer
+valuable insights for strategic planning, marketing, operational
+adjustments, and potential policy development. Here are the main
+takeaways:
+
+**Holidays and Weekends promotion** The model indicates longer trip
+durations during holidays and weekends. This suggests higher usage or
+leisurely rides during these periods. There could be an opportunity to
+increase bike availability or introduce special promotions during
+holidays and weekends to cater to this demand. The interaction effect
+suggests that members' increased trip duration is less pronounced on
+weekends. This could imply that members use the service differently on
+weekends compared to weekdays. Design weekend-specific promotions or
+services for members. Understanding why this pattern occurs (leisure vs.
+commuting) can help tailor these offerings.
+
+**Membership pricing strategy** Members tend to have significantly
+longer trip durations compared to non-members. This highlights the
+importance of members to the system. There should have a focus on member
+retention strategies and consider special offers or loyalty programs to
+encourage repeat usage. Additionally, analyzing non-member behavior to
+tailor services and promotions effectively would be pertinent.
+
+**Geographic optimization** Significant variability in trip durations
+across different stations and districts indicates diverse usage patterns
+in different areas. Optimize bike and dock availability based on
+specific district and station demands. Targeted investments in
+high-usage areas could improve service efficiency.
+
+**Potential Policy Implications** Understanding how different areas and
+demographics use the bike-sharing system can inform urban planning and
+public transport policies. Promoting bike-sharing effectively can
+contribute to environmental goals by reducing reliance on motorized
+transportation. \# Research Question 3: What variables impact the
+average bixi trip duration?
+
+# Research question 3 : Environmental factors that impact non-members avg trip length
+
+**The objective** is to identify environmental factors that impact average trip length of non-members. As we know, non-members' revenue is generated from a fixed cost per trip and varying cost proportional to the duration of the trip. Hence, evaluating properly the effect of the environmental conditions on the average trip length of non-members is primordial.
+
+## Variables Selection
+
+Variables that make business sense to include:
+
+-   Temperature in degrees celcius (`temp`)
+
+-   Rainfall in mm (`rain`)
+
+-   Part of the week i.e. weekend or weekday (`wknd_ind`)
+
+-   Location of the bixi station compared to Parc Lafontaine, a landmark
+    in the middle of the bixi station system (`cardinality`)
+
+-   If the station name contains the word 'metro' (`Metro_ind`)
+
+-   Season (`season`)
+
+## Data preparation
+
+```{r , echo=TRUE}
+df_nomem <- df_main[df_main$mem == 0, ]
+
+start_date = min(df_nomem$date)
+df_nomem$day_num = as.integer(df_nomem$date - start_date)
+
+df_nomem =df_nomem[order(df_nomem$date),]
+```
+We first filter the dataframe so that only non-members are included.
+Then we assigned a measure of distance in between observations of the same station. This distance is the number of days in between observations. These can vary from one station to another. Finally we ordered the dataset with dates ascending. This way,observation in auto regressive structure will be in the correct order.
+
+## Model
+We will now build a first reference model. This model is not valid as it does not take into consideration the correlation intra station. The result will yield higher level of confidence on the estimate of the coefficient. This model will be refered as model 0.
+
+```{r , echo=TRUE}
+mod0 <- gls(avg ~ temp + rain + wknd_ind + cardinality + Metro_ind + season, data = df_nomem)
+```
+
+We will procede to build a model that takes into consideration the structure of correlation of the errors. This way, intra station correlation will be captured. As we observe the same subject over time, auto-regressive structure is an appropriate choice. Also, knowing that time interval are not constant between observations, we will specify the time dimension.
+
+```{r , echo=TRUE}
+mod1 <- gls(avg ~ temp + rain + wknd_ind + cardinality + Metro_ind + season, correlation = corAR1(form = ~day_num|station), data = df_nomem)
+```
+
+As model 0 is nested in model 1, we will perform a lrt to compare both.
+
+
+```{r , echo=FALSE}
+anova(mod0, mod1)
+```
+The likelihood ratio tells us that the ordinary linear regression is not an adequate simplification of the model with AR1 structure, at a 5% confidence level. It is interesting to note that BIC criteria would have suggested using model 0.
+
+
+Let's look at the correlation structure that was estimated in our AR1 model.
+
+```{r , echo=FALSE}
+cov2cor(getVarCov(mod1, individual = 3))
+```
+
+We observe that the correlation is very small in between observations of the same station.
+
+Exploring the ARH1 structure would have been interesting, but computing limitation do not allow us to test for this, as the model takes too long to fit.
+
+Instead, we will jump right into models with random intercept. 
+
+```{r , echo=TRUE}
+mod2 <- lme(avg ~ temp + rain + wknd_ind + cardinality + Metro_ind + season, random = ~1 | station, data = df_nomem)
+```
+
+Let's compare this model with the simple linear regression model.
+
+```{r , echo=FALSE}
+anova(mod0, mod2)
+```
+We observe that the null model is not a adequate simplificaiton of the random intercept model.
+
+Let's continue by combining the random intercept and the error with auto regressive structure.
+
+```{r , echo=TRUE}
+mod3 <- lme(avg ~ temp + rain + wknd_ind + cardinality + Metro_ind + season, random = ~1 |
+station, correlation = corAR1(form = ~day_num | station), data = df_nomem)
+```
+
+```{r , echo=FALSE}
+anova(mod0, mod3)
+```
+Here again, We observe that the null model is not a adequate simplificaiton of the random intercept model plus the AR1 covariance structure on the errors.
+
+Furthermore, as all the models fitted so far have the same fixed effect, it is possible to compare them using AIC and BIC obtained from the REML method.
+
+```{r , echo=FALSE}
+anova(mod0,mod1,mod2,mod3)
+```
+
+According to both AIC and BIC, the best model would be model 2 which is the one using only random intercept. This may indicate that the auto-regressive structure was not performing so well.
+
+Let's print the necessary information for interpretation:
+
+```{r , echo=FALSE}
+summary(mod2)
+```
+
+```{r , echo=FALSE, warning=FALSE}
+Anova(mod2)
+```
+
+
+```{r , echo=FALSE}
+vcid1 = getVarCov(mod2, individual = 3, type = "marginal")
+```
+
+Correlation of individual 3:
+```{r , echo=FALSE}
+cov2cor(as.matrix(vcid1[[1]]))
+```
+We observe that the marginal correlation structure ressembles a lot that of a compound symmetric.
+
+## Interpretation of model with random intercept
+
+**Overall Model** - The model was fit using the rectified maxmimum likelihood method. It had an AIC of 32181 and BIC of 32259. It was found to be the best model according to these criteria. The random intercept standard deviation is of 2.7 quite an important variation relative to the fixed part of the intercept (12.97). We see that the model identified 747 groups aka stations in the dataset and a total of 4734 obsevations. Hence there would be on average 4734/747 =6.33 observations of each station of non-members.
+
+**Intercept** : The intercept can be interpeted as the expected average trip duration of non-members in the specific case where temperature is 0, there is no rain, it is a weekday, the trip departure is in the north-east of parc lafontaine, the station is not near a metro and the season is fall. In this case, we expect trip to be on average 12.97 minutes long.
+
+**Season**: The reference level is fall. We can see that on average trip
+duration during spring and summer are respectively 3.9 and 0.8 minutes
+longer than in fall holding everything else constant.
+
+**Temperature**: The coefficient of temperature is 0.14 which means that
+an increase in temperature of 1 degree celcius corresponds to an
+increase of average trip duration of 0.14 minutes on average holding all
+else constant.
+
+**Rainfall**: The coefficient for rain is -0.09 which means that an
+increase in rainfall of 1 mm corresponds to a decrease of average trip
+duration of 0.09 minutes on average holding all else constant.
+
+**Cardinality**: Their coefficients can be interpreted as the change in expected average trip duration compared to the reference departure point of north-east when all other variables are held constant. The effect of this variable is not deemed significant according to the analysis of deviance for a 5% confidence level.
+
+**Metro Indicator** : Metro indicator's coefficient is -0.47 which means
+that the expected value for average trip length decreases by 0.47
+minutes when a bixi station is near a metro acces point, holding all
+else constant. This would suggest that user who rent bikes after making
+a metro ride are closer to their final destination than in other cases. Although this effect is deemed no significative according to the analysis on deviance for a confidence level of 5%.
+
+**Weekend Indicator** : This coefficient means that during weekends, non-members are expected to have longer average trip length by 2.4 minutes when all other covariates are kept constant.
+
+## Business Implications:
+
+What we uncoverd is that given a season, temperature increases promotes longer trip for non-members. This will in turn generate more revenue and increase the demand on the bixi system. Also, rainfall as the exact opposite effect. Furthermore, weekend will generally imply significantly longer trips. Finaly, the usage during the spring season seems to be quite different than in other seasons as the coefficient for that specific month is quite higher and that for a constant temperature.
+
+## Verification of assumptions
+
+### Verification of Normality of Residuals and model correctly specified
+
+```{r, echo=FALSE, fig.width=6, fig.height=3}
+
+par(mfrow = c(1, 2))
+hist(mod2$residuals, main="Histogram of Residuals", xlab="Residuals")
+
+plot(predict(mod2), resid(mod2)) 
+
+```
+
+We observe a slightly longer tail on the right, but noting alarming.
+
+There may be some evidences of small heteroscedasticity in the second plot.
+
+### Verification of Heteroscedasticity
+
+```{r , echo=FALSE, fig.width=4, fig.height=3}
+
+residuals_df <- data.frame(df_nomem, residuals = residuals(mod2))
+
+p1 <- ggplot(data = residuals_df, aes(x = temp, y = residuals)) +
+  geom_point() +
+  labs(x = "temp", y = "Residuals")
+
+p2 <- ggplot(data = residuals_df, aes(x = rain, y = residuals)) +
+  geom_point() +
+  labs(x = "rain", y = "Residuals")
+
+
+p3 <- ggplot(data = residuals_df, aes(x = season, y = residuals)) + geom_boxplot() +
+  labs(x = "season", y = "Residuals")
+
+
+p4 <- ggplot(data = residuals_df, aes(x = wknd_ind, y = residuals)) + geom_boxplot() +
+  labs(x = "wknd_ind", y = "Residuals")
+
+
+grid.arrange(p1, p2,p3, p4, ncol=2)
+
+```
+
+No major problem of heteroscedasticity were detected except some slightly higher variance where there is no rain.
+
+
+# Conclusion
+
+In concluding the analysis of BIXI bike rentals, several key operational and strategic insights have emerged, offering a valuable perspective on user behaviors and rental patterns. This analysis has been instrumental in uncovering trends such as peak rental times, favored locations, and typical rental durations, which are crucial for optimizing bike availability and station maintenance. Additionally, the data provides a solid foundation for strategic planning, potentially guiding decisions on expansion, pricing strategies, and targeted marketing campaigns.
+
+However, the conclusions drawn must be contextualized within the constraints of the dataset and methodology. The presence of outliers in the data has the potential to skew the modeling results, indicating that some user behaviors may not conform to the general trends observed. This highlights the need for cautious interpretation, especially in predictive analytics. Furthermore, the challenge in accurately measuring members' revenue due to a fixed cost model suggests that financial analyses might not completely capture the economic impacts or profitability of the service.
+
+The aggregated nature of the dataset further limits the granularity of insights, restricting the ability to draw detailed conclusions about individual user behaviors and preferences. This aggregation necessitates a careful approach in extrapolating the data to broader contexts. Moreover, the distinction between causation and correlation observed in the regression models is critical. While the analysis identifies patterns and relationships, it does not establish causality, thus cautioning against definitive assertions about the reasons behind observed trends.
+
+Finally, the data's exclusion of trips longer than 60 minutes potentially overlooks a segment of the user base, which might lead to a misrepresentation of overall usage patterns and user needs.
+
+Overall, while the analysis of BIXI bike rentals yields significant insights for both operational efficiency and strategic development, these must be weighed against the limitations of the dataset and analytical approaches. A balanced consideration of these factors will enable a more nuanced and effective use of the data in enhancing the BIXI service.
+
+# Contribution
+
+Charles Julien :Research question 3 and limitations
+
+Gabriel Jobert : RQ 2 + conclusion
+
+Chike Odenigbo: Research Question 1
+
+Atul Sharma: Introduction + RQ1
