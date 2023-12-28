@@ -1,0 +1,830 @@
+---
+title: "Part 3: Generalized Linear Models"
+author: "Charles Julien, Chike Odenigbo, Atul Sharma, Gabriel Jobert"
+date: "11/17/2023"
+geometry: "left=2cm,right=2cm,top=1cm,bottom=1.2cm"
+output:
+  pdf_document:
+    toc: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = FALSE, warning=FALSE, include = FALSE, echo=FALSE}
+# Import (The fewer the better)
+#install.packages('AER')
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(leaflet)
+library(gridExtra)
+library(broom)
+library(stats)
+library(car)
+library(janitor)
+library(tibble)
+library(MASS)
+library(knitr)
+library(AER)
+```
+
+```{r load_data, include=FALSE}
+# Data loading
+
+# Set working directory to file location
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df_raw = read.csv("./../src/bixi10.csv")
+df_station = read.csv("./../src/2021_stations.csv")
+df_main = left_join(df_raw,df_station,by = c("station"="pk"))
+head(df_main)
+
+```
+
+```{r echo=FALSE}
+# Data preparation and feature engineering
+
+
+# Note: Correlation between rev and dur is very high 0.994467
+
+df_main <- df_main %>% mutate(
+              holiday = factor(holiday),
+              mem = factor(mem),
+              mm = factor(mm),
+              station = factor(station),
+              
+              wday_ordered = factor(wday, levels = c("Monday", "Tuesday", "Wednesday",  "Thursday", "Friday", "Saturday", "Sunday"),ordered = TRUE),
+              season = ifelse((mm %in% c(12,1,2)), 'Winter',
+                       ifelse((mm %in% c(3,4,5)), 'Spring',
+                       ifelse((mm %in% c(6,7,8)), 'Summer',
+                       ifelse((mm %in% c(9,10,11)), 'Fall','No Season')))),
+              
+              rain_ind = factor(ifelse((rain != 0), 'Rain', 'NoRain')),
+              
+              # Compared to Parc Lafontaine 
+              North_South = factor(ifelse(latitude>45.5271, 'North', 'South')),
+              West_East = factor(ifelse(longitude>-73.5705, 'East', 'West')),
+              
+              # Beginning of month versus end of month
+              PartOfMonth = factor(ifelse(dd>15, 'EOM', 'BOM')),
+              
+              Metro_ind = factor(ifelse(grepl("Métro", name),1,0)),
+              
+              lntot = log(n_tot),
+              
+              rev_per_min = rev/dur,
+              rev_per_trip = rev/n_tot,
+             
+              percent_AM = n_AM/n_tot,
+              percent_PM = n_PM/n_tot,
+              
+              percent_AM_PM_delta = percent_AM - percent_PM,
+              n_AM_PM_delta = n_AM - n_PM,
+              
+              am_pm_ind = ifelse(n_AM>=n_PM, 'AM','PM'),
+              
+              wknd_ind = factor(ifelse((wday %in% c("Sunday","Saturday")), 'Weekend'
+                        ,'Weekday')),
+                
+              long_wknd_ind = factor(ifelse((wday %in% c("Sunday","Saturday")), 'Weekend'
+                        ,ifelse((wday %in% c("Friday","Monday") & holiday=='1'),'Long Weekend','Weekday'))),
+        
+              year = 2021 ,
+              
+              date = as.Date(paste(year,mm,dd,sep="/")),
+              
+              week_num = as.numeric(strftime(date, format = "%V")),
+ 
+              hot_weather_ind = factor(ifelse(temp > 15, 'Hot', 'Cold')),
+# create a new variable indicating whether the average daily trip duration exceeds 15 minutes, and explore models for this new variable.
+
+              avg_15_ind = factor(ifelse(avg>15,1,0))
+
+)
+
+
+```
+
+# Introduction
+
+In the dynamic realm of urban mobility, the Bixi public cycling service
+plays a pivotal role in providing a sustainable and accessible
+transportation alternative. As consultants entrusted with a
+comprehensive analysis of Bixi's operational data, our approach
+integrates sophisticated statistical techniques, specifically
+Generalized Linear Models (GLM), to derive actionable insights. This
+report unfolds the findings derived from GLM applications, shedding
+light on critical aspects such as trip durations, ridership patterns,
+and the impact of external factors.
+
+Our analytical scope encompasses a multifaceted examination of factors
+influencing trip durations, total trip counts, and the temporal dynamics
+of ridership. By applying GLM to address the identified research
+questions, we aim to unearth insights that are instrumental in shaping
+strategic decisions for Bixi's operational enhancements. Central to our
+methodology is the implementation of Generalized Linear Models, a
+statistical framework adept at capturing complex relationships within
+diverse datasets. Our application of GLM is tailored to respond to
+specific research questions, providing a granular understanding of the
+nuanced dynamics at play in Bixi's operational landscape.
+
+The main focus of this analysis will be on number of rentals (total, AM,
+and PM), and on long trips (\>15min).
+
+## Preliminary T-Test for Variable Selection
+
+As a general hypothesis, prior to diving into our research questions we
+explored the target variables through variables of interest using
+t-tests. More specifically, we wanted to determine whether the holiday
+period and the weather had a significant impact on the targets.
+
+Using a 2 sample t-test, we tested if the average trip duration was the
+same in holiday vs non holiday period. In all cases, the test statistic
+is the mean difference difference by the difference in standard
+deviations of both groups. Using a significance level of 5% we can
+reject the null hypothesis and conclude that the average trip duration
+is not the same in holiday and non-holiday periods though they differ by
+less than a minute using the sample means of the groups.
+
+```{r}
+t.test(avg ~ holiday, data = df_main, var.equal = TRUE)
+```
+
+On the other hand, looking at the total number of trips we can conclude
+that using a significance level of 5% that the trips do not differ from
+holiday periods to non-holiday periods.
+
+```{r}
+t.test(n_tot ~ holiday, data = df_main, var.equal = TRUE)
+```
+
+Looking at membership, we can conclude that non-members take longer
+trips on average than members using a significance level of 5%.
+Non-members seem to take trips about 2 minutes longer than members.
+
+```{r}
+t.test(avg ~ mem, data = df_main, var.equal = TRUE)
+```
+
+We can also conclude that members take more total trips than non-members
+using a significance level of 5%.
+
+```{r}
+t.test(n_tot ~ mem, data = df_main, var.equal = TRUE)
+```
+
+Looking at days when it rains, we can conclude that there is a
+significant difference in average trip duration on rainy days compared
+to non-rainy days with a 95% confidence level. Though the difference is
+by less than 1 minute.
+
+```{r}
+t.test(avg ~ rain_ind, data = df_main, var.equal = TRUE)
+```
+
+We can also conclude that the mean difference in number of trips in
+rainy days and non-rainy days is significant using a 5% significance
+level.
+
+```{r}
+t.test(n_tot ~ rain_ind, data = df_main, var.equal = TRUE)
+```
+
+Through the above t-test, we can expect holidays periods to play a less
+important role in our variables of interest and for weather as well as
+membership to play a more significant role. As such we can explore
+strategies such as dynamic pricing given the weather and membership
+incentives.
+
+# Research Question 1: How does membership and holidays affect likelihood of longer trips (average duration exceeds 15 minutes) ?
+
+**Objective of Analysis:** Understand member behavior in terms of rental
+duration to tailor membership benefits and pricing strategies.
+
+## Variables Selection
+
+To evaluate how the membership and holidays affect likelihood of longer
+trips, we need to create a model that accounts for the membership and
+holidays variable and to use the new variable created to know if the
+trip is above 15 minutes as the interest variable. The goal would be to
+quantify the relationship between these factor and the "longer trips"
+variable.
+
+## Model
+
+Here we use a logistic regression model, which is a type of GLM suitable
+for binary outcomes, with a binomial distribution and a logit link
+function.
+
+```{r model1, echo=FALSE}
+glm_membership <- glm(avg_15_ind ~ mem + holiday + wknd_ind, family = binomial, data = df_main)
+summary(glm_membership)
+```
+
+## Interpretation
+
+-   **Intercept (`-0.13473`)**: This is the log-odds of a trip exceeding
+    15 minutes when all predictors (mem, holiday, and wknd_ind) are at
+    their reference level (likely non-members, non-holiday, and on
+<<<<<<< HEAD
+    weekdays).**Odds**: $e^{-0.13473} = 0.87395$.**Probability
+    (Intercept)**: $\frac{0.87395}{1 + 0.87395} = 0.4664$ (approximately
+    46.64%). This means that when all independent variables are at their
+    reference levels, the probability of a trip exceeding 15 minutes is
+    approximately 46.64%.
+=======
+    weekdays).**Odds ratio (Intercept)**:
+    $e^{-0.13473} = 0.87395$.**Probability (Intercept)**:
+    $\frac{0.87395}{1 + 0.87395} = 0.4664$ (approximately 46.64%). This
+    means when all independent variables are at their reference levels,
+    the probability of a trip exceeding 15 minutes is approximately
+    46.64%.
+>>>>>>> ab399c210b84b4094948cf81133cf30ddb803a6f
+
+-   **Membership (`mem1`, `-0.88328`)**: The log-odds of a trip
+    exceeding 15 minutes is 0.88328 units lower for members compared to
+    non-members, holding other variables constant (Non-holidays and
+<<<<<<< HEAD
+    weekdays). **Odds ratio**: $e^{-0.88328} = 0.41342$. This means that
+    the odds of a trip exceeding 15 minutes for members are on average
+    0.41 times the odds for non-members holding all else constant. When
+    all variables are at their reference level except membership, we
+    expect a probability of seeing a longer trip of
+    $\frac{e^(-0.13473-0.88328)}{1 + e^(-0.13473-0.88328)} = 0.265$
+
+-   **Holiday (`holiday1`, `0.60985`)**: The log-odds of a trip
+    exceeding 15 minutes is 0.60985 units higher during holidays
+    compared to non-holidays, holding other variables constant. **Odds
+    ratio**: $e^{0.60985} = 1.84016$. This indicates that the odds of a
+    trip exceeding 15 minutes on holidays are on average 1.84 times
+    higher than on non-holidays when other covariates are fixed.
+=======
+    weekdays). **Odds ratio**: $e^{-0.88328} = 0.41342$. **Probability**:
+    $\frac{0.41342}{1 + 0.41342} = 0.2925$ (approximately 29.25%). This
+    means that the oods of a trip exceeding 15 minutes for members are
+    about 0.41 times the odds for non-members, translating to a
+    probability of approximately 29.25%.
+
+-   **Holiday (`holiday1`, `0.60985`)**: The log-odds of a trip
+    exceeding 15 minutes is 0.60985 units higher during holidays
+    compared to non-holidays, holding other variables constant.
+    **Odds ratio**: $e^{0.60985} = 1.84016$. **Probability**:
+    $\frac{1.84016}{1 + 1.84016} = 0.6479$ (approximately 64.79%). This
+    indicates that the odds of a trip exceeding 15 minutes on holidays
+    are about 1.84 times higher than on non-holidays, resulting in a
+    probability of approximately 64.79%.
+>>>>>>> ab399c210b84b4094948cf81133cf30ddb803a6f
+
+-   **Weekend (`wknd_indWeekend`, `0.55915`)**:The log-odds of a trip
+    exceeding 15 minutes is 0.55915 units higher during weekends
+    compared to weekdays, holding other variables constant (during
+<<<<<<< HEAD
+    week-end on non-holidays times). **Odds ratio**:
+    $e^{0.55915} = 1.74919$. This means that the odds of a trip
+    exceeding 15 minutes on weekends are on average 1.75 times higher
+    than on weekdays when other covariates are constant.
+=======
+    week-end on non-holidays times). **Odds ratio**: $e^{0.55915} = 1.74919$.
+    **Probability**: $\frac{1.74919}{1 + 1.74919} = 0.6363$
+    (approximately 63.63%). This means that the odds of a trip exceeding
+    15 minutes on weekends are about 1.75 times higher than on weekdays,
+    translating to a probability of approximately 63.63%.
+>>>>>>> ab399c210b84b4094948cf81133cf30ddb803a6f
+
+-   **Statistical Significance**: In this model, all the p-values are
+    under the 5% level of significance, indicating that the relationship
+    between these variables and the likelihood of taking a longer trip
+    are statistically significant.
+
+-   **Model Fit**: The AIC of the model is 12869, which can be used for
+    model comparison purposes. The lower the AIC, the better the model
+    fits the data while penalizing for complexity.
+
+## Business implications
+
+-   Since members are less likely to take longer trips, membership
+    benefits and pricing could be adjusted to encourage more extended
+    use, or to better cater to the frequent, shorter trips that members
+    seem to prefer.
+
+-   The increase in longer trips during holidays and weekends indicates
+    potential opportunities for targeted marketing and promotions to
+    encourage bike usage during these periods.
+
+-   The significant increase in the likelihood of longer trips during
+    long weekends, especially on the weekend days, suggests that there
+    might be a need for increased bike availability and maintenance
+    during these times to accommodate the higher demand for leisurely
+    rides.
+
+## Anova test
+
+Furthermore, we also performed an Anova test between a full model and
+a reduced model. The reduced model in this case is the model from above 
+whereas the full model also includes the covariate season. The goal here is to
+determine if the addition of season significantly improves the
+model's fit. The test statistic is thus the difference in -2 times the
+log likelihood (-2LL) of the reduced as well as -2LL of the complete
+model with the null hypothesis being that the likelihood is the same and
+the alternate being that the likelihood is different. In essence, we
+want to determine if the addition of season improves the likelihood
+of observing the data.
+
+```{r}
+glm_membership_full <- glm(avg_15_ind ~ mem + holiday + wknd_ind + season, family = binomial, data = df_main)
+anova(glm_membership,glm_membership_full,test="LRT")
+```
+
+-   Model 2 has 9994 degrees of freedom. Model 1 has 9996 degrees of
+    freedom, which is two more than Model 2, indicating that two
+    additional parameter (here, season(3 levels)) was included in Model 2.
+-   Model 1 has a residual deviance of 12861 Model 2 has a residual
+    deviance of 12574, which is higher, suggesting a better fit to the
+    data than Model 1.
+-   The deviance reduction from Model 1 to Model 2 is 286.68 This is
+    the difference in the Resid. Dev between the two models,
+    representing the improvement in fit due to including the season
+    variable.
+-   The p-value associated with this deviance reduction is less than
+    2.2e-16, which is extremely small and indicates that the improvement
+    in the model fit by including season is statistically significant.
+
+The addition of the season variable to the model significantly improves the
+model's ability to predict whether a trip will last longer than 15
+minutes. The very low p-value associated with the deviance reduction
+upon adding season to the model confirms that membership status has a
+statistically significant effect on the likelihood of a trip exceeding
+15 minutes, beyond what is explained by holiday and weekend indicators
+alone. Thus, seasonality will be explored in the next model.
+
+# Research Question 2: How do the seasonal variation in weather affect the total number of trip ?
+
+**Objective of Analysis:** Evaluate how seasonal weather patterns
+influence rental numbers to inform seasonal staffing and maintenance
+schedules.
+
+## Variables Selection
+
+To evaluate how seasonal weather patterns influence rental numbers, we
+need to create a model that accounts for the various factors that can
+vary with seasons, such as temperature, rainfall and specific time of
+year (season). The goal would be to quantify the relationship between
+these factors and the number of rentals, which can then inform decisions
+on staffing and maintenance schedules.
+
+## Model
+
+Rental numbers are count data, so a Poisson or negative binomial GLM
+would both be suitable. Here, we first fit a Poisson regression model
+and check for over-dispersion. Since the value is significantly greater
+than 1, we then fit a Negative Binomial model that will be more
+appropriate for this particular case.
+
+```{r model_2, echo=FALSE}
+# Poisson model
+glm_seasonal_weather <- glm(n_tot ~ temp + rain + season, family = poisson, data = df_main)
+dispersiontest(glm_seasonal_weather)
+
+# Negative Binomial model
+glm_seasonal_weather_2 <- glm.nb(n_tot ~ temp + rain + season, data = df_main)
+summary(glm_seasonal_weather_2)
+```
+
+## Interpretation
+
+-   **Theta**: The estimate for theta ($\theta = 0.9902$) is close to 1.
+    This indicates that the variance is slightly greater than the mean,
+    which is consistent with some overdispersion in the data. This
+    overdispersion justifies the use of the Negative Binomial model over
+    the Poisson model.
+
+-   **Model Fit**: The AIC of the model is 79919, which can be used for
+    model comparison purposes. The lower the AIC, the better the model
+    fits the data while penalizing for complexity.
+
+-   **Intercept**: The intercept ($\beta = 2.581791$) represents the log
+    count of the total number of trips when all other variables are
+    zero. This is on a day in fall where the temperature is zero and
+    there is no rain.
+
+-   **Temperature (`temp`)**: The incidence rate ratio (IRR) for
+    temperature is $e^{0.031157}$, which is approximately 1.032. This
+    means that for each one-degree Celsius increase in temperature, the
+    expected number of total trips increases by a factor of 1.032, or
+    3.2%.
+
+-   **Rainfall (`rain`)**: The IRR for rainfall is $e^{-0.015916}$,
+    which is approximately 0.984. This indicates that for each
+    additional millimeter of rainfall, the expected number of trips
+    decreases by a factor of 0.984, or 1.6%. So, if rainfall increases
+    by 1 mm, the model predicts a 1.6% decrease in the number of trips
+    holding all else constant.
+
+-   **Season (`seasonSpring`, `seasonSummer`)**:
+
+    -   For `seasonSpring`: The IRR is $e^{-0.265988}$, approximately
+        0.767. This suggests that, all else being equal, the expected
+        number of trips in spring is 76.7% of the number in the baseline
+        season (`seasonFall`), which is a 23.3% decrease.
+
+    -   For `seasonSummer`: The IRR is $e^{-0.113913}$, approximately
+        0.892. This means that in summer, the expected number of trips
+        is 89.2% of the number in the baseline season (`seasonFall`), a
+        10.8% decrease.
+
+## Business implications
+
+-   The bike-sharing service is likely to see increased demand on
+    warmer, drier days. This can guide the allocation of bikes across
+    stations and the scheduling of staff for redistribution and customer
+    service.
+
+-   During rainy days, demand is expected to drop, which could be a good
+    time for scheduling maintenance work.
+
+-   The observed reduction in trips during the spring and summer, when
+    compared to the baseline season, indicates that there might be other
+    influencing factors to consider. This observation is made under the
+    assumption that temperature remains constant, which is unlikely to
+    be accurate. In reality, trip frequency is probably not lower in the
+    summer than in the fall. Therefore, it might be necessary to explore
+    additional variables or implement targeted marketing strategies to
+    enhance ridership in these seasons.
+
+    ##  Anova test
+
+```{r}
+# Poisson model
+glm_seasonal_weather_full <- glm.nb(n_tot ~ mem + holiday + temp + rain + season, data = df_main)
+anova(glm_seasonal_weather,glm_seasonal_weather_full,test="LRT")
+```
+
+-   Model 1: Predicts n_tot using temp, rain, and season as predictors.
+
+-   Model 2: Predicts n_tot using mem, holiday, temp, rain, and season.
+
+-   Degrees of Freedom (Df): Model 1 has 9995 residual degrees of
+    freedom, and Model 2 has 9993, which suggests that two parameters
+    were added in Model 2 (mem and holiday).
+
+-   Residual Deviance: It is a measure of unexplained variance by the
+    model. Model 1 has a residual deviance of 204541, and Model 2 has a
+    significantly lower residual deviance of 125397, indicating that
+    Model 2 fits the data much better.
+
+-   Deviance Difference: The difference in deviance between the two
+    models is 79144, which is highly significant (p \< 2.2e-16),
+    indicating that the predictors added in Model 2 (mem and holiday)
+    significantly improve the model.
+
+In conclusion, the analysis strongly suggests that including mem and
+holiday improves the model's ability to predict n_tot. Given that
+information, some additional research on the member variable impact on
+the number of trips will be made. Additionally, the presence of
+overdispersion justifies the use of the Negative Binomial model over the
+Poisson model for this data.
+
+# Research Question 3: What variables impacts the porportion of trips in the morning versus in the evening and in what way ?
+
+**Objective of Analysis:** The goal of this analysis is to understand
+what variables influence the repartition of the trips throughout the
+day. Knowing this would help to better forecast the demand for bikes
+across the bixi system.
+
+Before starting the analysis, it is important to know that our datasets
+has 57.76% of its trips in the afternoon.
+
+```{r}
+sum(df_main$n_PM)/sum(df_main$n_tot)
+```
+
+## Variables Selection
+
+Some variables that would be interesting to investigate are the
+following:
+
+`mem` : Membership indicator
+
+`wknd_ind` : Indicator of weekend
+
+`season` : Categorical variable with autumn, summer and fall
+
+`temp` : Temperature in degrees celcius
+
+`rain` : Precipitation in mm
+
+`North_South` : Indicator of cardinality compared to parc lafontaine
+
+`West_East`: Indicator of cardinality compared to parc lafontaine
+
+`Metro_ind` : Indicator of metro station nearby
+
+**Correlation:**
+
+The correlation between the variables selected above was already tested
+via multicollinearity tests like VIF in previous analysis and did not
+show source of concern.
+
+**Interest variable:**
+
+Our interest variable for this question is the proportion of trips in
+the afternoon compared to the total number of trips. Since `n_PM` is a
+count we expect a poisson like distribution. To obtain a rate we will
+use the variable `n_tot` as an offset.
+
+```{r interest variable}
+hist(df_main$n_PM, breaks = 30)
+```
+
+```{r dispersion}
+mean(df_main$n_PM)
+var(df_main$n_PM)
+```
+
+We observe some big disparities between the mean and variance of the
+variable `n_PM` which could lead to some overdispersion in our model.
+Some formal test will be explored in the model part.
+
+## Model
+
+```{r model_3, echo=FALSE}
+mod.poi <- glm(n_PM ~ mem + wknd_ind +season + temp + rain + North_South  + West_East + Metro_ind + offset(log(n_tot)) , data = df_main, family = poisson(link = "log"))
+
+summary(mod.poi)
+
+```
+
+```{r}
+# Deviance based
+mod.poi$deviance/mod.poi$df.residual
+
+# Based on Pearon X2 statistic
+sum(residuals(mod.poi, type = "pearson")^2)/mod.poi$df.residual
+```
+
+Once the covariates and offset are taken into consideration, we seem to
+be more in a case of underdispersion since the dispersion (k) is smaller
+than 1. For this reason, we will explore a quasipoisson distribution in
+order to increase flexibility and allow the mean to be different from
+the variance.
+
+```{r}
+mod.quasi <- glm(n_PM ~ mem + wknd_ind +season + temp + rain + North_South  + West_East + Metro_ind + offset(log(n_tot)) , data = df_main, family = quasipoisson)
+summary(mod.quasi)
+```
+
+```{r}
+Anova(mod.quasi, type = 3)
+```
+
+## Interpretation
+
+**Overall Model** We observe that the dispersion parameter of the model
+is estimated to be 0.68 which means that the means given the covariates
+is bigger than its variance. According to the Anova command, all
+variables included in the model are significant, once adjusted for all
+the covariates, except for `metro_ind`
+
+**Intercept** : -0.605 can be interpreted as the log average rate of
+trip in the afternoon when all covariates have values of zero.
+
+In other words, this is the average rate of trip in the afternoon for
+non-member, during the weekday, in fall, when temperature is zero
+degrees celcius, no precipitation, with rental location north east of
+parc lafontaine and at an acces point that as no metro station nearby
+which is exp(-0.605) = 54.6%.
+
+**Membership :** 0.039 is a positive coefficient hence membership
+increase the rate of trip in the afternoon, on average, when all else is
+being held constant by a factor of exp(0.039) = 1.039 which means an
+increase of about 4% .
+
+**Weekend:** 0.022 is a positive coefficient hence weekend increase the
+rate of trip in the afternoon, on average, when all else is being held
+constant by a factor of exp(0.022) = 1.022 which means an increase of
+about 2% .
+
+**Season:** Spring's coefficient is 0.181 and summer's is 0.005 meaning
+that they both have an increase in rate of trip in the afternoon on
+average compared to fall when all else is being held constant. This
+increase is of a factor of exp(0.181) = 1.198 and exp(0.005) = 1.005
+respectively for both season.
+
+**Temperature:** -0.002 which means that a one degree celcius increase
+in temperature results in a decrease in rate of afternoon trips on
+average when all else is being held constant. This decrease is of a
+factor of exp(-0.002) = 0.998.
+
+**Precipitation :**- rain coefficient is also -0.002 hence its
+interpretation is the same as for temperature except that the decrease
+is for each additional milliliters of rain.
+
+**Cardinality North-South:** 0.041 is a positive coefficient hence
+departure from bixi station south of parc lafontaine have a higher rate
+of trip in the afternoon, on average, when all else is being held
+constant by a factor of exp(0.041) = 1.041 which means an increase of
+about 4% compared to northern departure.
+
+**Cardinality West-East:** -0.017 is a positive coefficient hence
+departure from bixi station west of parc lafontaine have a lower rate of
+trip in the afternoon, on average, when all else is being held constant
+by a factor of exp(-0.017) = 0.983 which means a decrease of about 2%
+compared to eastern departure.
+
+**Metro station nearby:** coefficient is 0.009 which although not being
+significatively differrent from zero can be interpreted as having a
+metro station nearby increase the rate of trip in the afternoon, on
+average, when all else is being held constant by a factor of exp(0.009)
+= 1.009 .
+
+## Business Implications:
+
+The main takeaways from this model are:
+
+-   Members have a higher rate of trips in the afternoon. Knowing that
+    members account for most of the trips, it can explain why there is
+    more trip in the afternoon in general.
+
+```{r, echo=FALSE}
+df_main %>%    group_by(mem) %>%    summarize(n_tot = sum(n_tot))
+```
+
+-   There will be an increase demand on the system in the afternoon
+    during the weekend and an increase demand on the system in the
+    morning during the weekdays. This could reflect the usage of people
+    using bixi to commute to work.
+
+-   There is a strong increase in rate of trips in the afternoon during
+    the season of spring, this could be seen as an eagerness for bike
+    after winter since afternoon trips seems to be more associated with
+    leisure than commuting. Another hypothesis would be that during
+    spring the mornings are too cold to bike most often.
+
+-   Following the above hypothesis, as temperature increase, there seems
+    to be an increase of rate of trip in the morning. Keep in mind that
+    this relation is only true for a given season.
+
+-   Finally concerning the general flow of trips, there seems to be a
+    higher rate of departure from stations North West to Parc Lafontaine
+    in the morning than in the afternoon. Similarly, we have the inverse
+    relation for station in the South East. This means that from an
+    operational standpoint, there might be some displacement of bikes
+    required from stations to stations depending on the moment of the
+    day to keep a balanced fleet of bikes all over the system.
+
+# Research Question 4: Are there significant differences in bike trips counts between weekdays and weekends?
+
+**Objective of Analysis:** The objective of the analysis is to quantify
+and assess the differences in ridership during weekend and weekdays. The
+analysis would generate insights into the patterns of ridership that
+could be useful for operational planning, resource allocation, or
+service improvements.
+
+## Variables Selection
+
+We can also see from the histogram that the response variable is skewed
+to the right. It's clear that linear regression would not be appropriate
+in this context. We can fit the Poisson regression model using the glm
+function, specifying that the distribution is poisson. We'll start by
+fitting the model which includes all explanatory variable:
+
+```{r}
+hist(df_main$n_tot, breaks = 20, main = "Histogram of n_tot", xlab = "n_tot")
+
+```
+
+## Model
+
+```{r model_4, echo=FALSE}
+
+# Create a new variable to denote weekdays and weekends
+df_main <- df_main %>%
+  mutate(weekday_weekend = ifelse(wday %in% c("Saturday", "Sunday"), "Weekend", "Weekday"))
+
+# Fit separate GLMs for trip counts by weekday/weekend
+total_model <- glm(n_tot ~ weekday_weekend, data = df_main, family = poisson)
+
+# View summaries of the models
+summary(total_model)
+
+```
+
+## Interpretation
+
+**Intercept** :
+
+The intercept (3.004083) represents the expected log count of the total
+number of trips on weekdays.In other words, the expected number of trips
+on weekdays is exp(3.004083)=20.
+
+**Weekend** :
+
+weekend = -0.040604: number of trips is higher on weekdays than weekend.
+More specifically, the mean number of trips on weekend is exp(-0.040604)
+= 0.96 times those on weekdays. In other words, the mean number of trips
+on weekend is 4% lower than that in weekdays.The p-value is 3.37e-16
+which is less that any acceptable value of alpha which represent that
+the difference in trip number during weekend and weekdays is
+statistically different.
+
+## Business Implications:
+
+**Resource Allocation**: Given the higher demand during weekdays,
+businesses or services dependent on these trips may need to allocate
+more resources, such as bikes, maintenance, or staff, during these
+periods.
+
+**Pricing Strategies**: If the service is fee-based, adjusting pricing
+strategies to account for the difference in demand between weekdays and
+weekends could be considered. For instance, offering promotions or
+discounts during lower demand days (weekends) to attract more users.
+
+**Marketing Efforts**: Tailoring marketing campaigns or efforts to
+encourage more weekend usage could be explored. Promoting special
+events, family packages, or leisure-oriented offers during weekends
+might help in increasing weekend ridership.
+
+**Operational Optimization**: During weekends, operational adjustments
+could be made to enhance the user experience. For instance, ensuring
+bike availability, adjusting operating hours, or implementing
+user-friendly initiatives to attract more weekend users.
+
+**Service Enhancements**: Understanding the differences in usage
+patterns can guide service improvements. Addressing any barriers that
+might discourage weekend ridership, such as safety concerns, parking
+availability, or service accessibility, could be a focus for
+enhancements.
+
+# Limitations and shortcomings
+
+**Autocorrelation of data**: The observations in the dataset are not
+independent, as seen in previous analyses. This autocorrelation can
+impact the validity of statistical tests and models, potentially leading
+to biased or inaccurate conclusions.
+
+**External Factors and Generalizability**: The analysis primarily
+focuses on internal variables within the dataset, overlooking potential
+external influences such as changes in city infrastructure or broader
+economic conditions. This limits the generalizability of the results to
+broader contexts.
+
+**Temporal Dynamics and Long-Term Trends**: The study's insights are
+confined to the timeframe for year 2021, potentially missing long-term
+shifts in user behavior or external factors. The temporal dynamics of
+the bike-sharing service may evolve beyond the study period.
+
+**Model Specificity**: The use of Generalized Linear Models (GLMs) is
+tailored for the specific dataset and research questions at hand. While
+GLMs are versatile, they might not capture all the nuances or
+complexities of the data, such as non-linear relationships or
+interactions between variables that a different modeling approach could
+reveal.
+
+**Sensitivity to Parameter Choices**: GLMs involve decisions about which
+link function to use and how to structure the model. Different choices
+can lead to different interpretations, and the report does not discuss
+the sensitivity of the results to these choices.
+
+**Assumptions of the Modeling Approach**: Every statistical model,
+including GLMs, comes with underlying assumptions (e.g., about the
+distribution of errors). If these assumptions are violated, it can lead
+to biased results. The report does not explicitly discuss how these
+assumptions were tested or met.
+
+# Conclusion
+
+In conclusion, the examination of Bixi's operational data utilizing
+Generalized Linear Models (GLM) has unveiled pivotal insights that can
+strategically reshape the bike-sharing service. The analysis has
+pinpointed the profound impact of weather conditions, seasonal
+variations, and membership dynamics on ridership behavior. This newfound
+understanding positions Bixi to implement targeted strategies,
+optimizing resource allocation, and addressing specific user preferences
+to enhance the overall service experience.
+
+Strategically, Bixi is poised to benefit from dynamic resource
+allocation informed by weather patterns, ensuring optimal bike
+distribution and efficient staff scheduling. The identification of
+seasonal ridership nuances prompts tailored marketing initiatives,
+providing an opportunity to counteract dips in colder weather ridership.
+Moreover, the strategic refinement of membership structures aligns with
+user preferences, enhancing engagement and satisfaction. Capitalizing on
+the surge in longer trips during holidays and extended weekends through
+targeted campaigns further positions Bixi to maximize user engagement
+and solidify its position in the competitive urban mobility sector.
+
+# Contribution
+
+Charles Julien : Business question 3, correction and integration of all parts
+
+Gabriel Jobert : Business question 1 and 2
+
+Chike Odenigbo : t-test, anova, added to feature engineering, part of
+conclusion
+
+Atul Sharma : Introduction and Research question 4
