@@ -1,0 +1,485 @@
+# Report - Preliminary understanding of the bixi 2021 season
+
+
+In a rapidly transforming urban landscape, sustainable and efficient modes of transport are not only desirable but essential. BIXI, Montreal's pioneering bike share initiative, has emerged as a key player in this transformative movement, offering residents and visitors an environmentally friendly, convenient and health-friendly alternative to traditional means of transportation.
+
+We Chike Odenigbo, Charles Julien, Atul Sharma and Gabriel Jobert, a leading consulting team have undertaken a meticulous exploration of BIXI's operations for the 2021 season. Our goal is to highlight the opportunities hiding in BIXI's data. Such an examination is vital, not only for the stakeholders directly associated with BIXI, but also for urban planners, policy-makers, environmentalists and businesses who see the potential of this revolutionary mode of transport.
+
+As you read through this report, you will discover a harmonious blend of quantitative rigour and qualitative analysis, designed to facilitate informed decision-making by all the stakeholders involved.
+
+To extract more information from the station number, we enhance the dataset with the actual name and geographical coordinates of each station.
+
+```{r message = FALSE, include = FALSE, echo=FALSE} 
+# UNCOMMENT BELOW IF PACKAGES ARE NOT INSTALLED
+#install.packages("rstudioapi")
+#tinytex::install_tinytex()
+# Install and load the tidyverse package
+#install.packages("tidyverse")
+#install.packages('devtools')
+#devtools::install_github('bbc/bbplot')
+#install.packages('Hmisc')
+#install.packages('corrmorant')
+#remotes::install_github("r-link/corrmorant")
+#install.packages('DataExplorer')
+#install.packages('skimr')
+#install.packages('PerformanceAnalytics')
+```
+
+```{r message = FALSE, warning=FALSE, include = FALSE, echo=FALSE}
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(Hmisc)
+library(data.table)
+library(DataExplorer)
+library(skimr)
+library(PerformanceAnalytics)
+library(dplyr)
+library(leaflet)
+
+```
+
+```{r echo=FALSE}
+df_raw=read.csv("bixi10 - data.csv", header = TRUE)
+df_station=read.csv('2021_stations.csv',header=TRUE) #Adding station name as well as their location
+
+df_main = left_join(df_raw,df_station,by = c("station"="pk"))
+```
+
+# General Summary
+
+After setting up the data, we can quickly visualize general trends by plotting histograms of all variables and calculating basic descriptive statistics on our dataset.
+
+```{r echo=FALSE}
+skim(df_main)
+df_main %>% plot_histogram()
+```
+
+```{r results='hide', echo=FALSE}
+num_df = df_main %>% select(where(is.numeric)) %>% na.omit()
+print(colnames(num_df))
+corr1_cols = c("percent_AM","dur","rain","n_tot","n_AM_PM_delta")
+corr2_cols = c("temp","_AM","rain","rev_per_trip","percent_PM")
+corr3_cols = c("dd","rev_per_trip","percent_AM","percent_PM")
+corr4_cols = c("rain","avg","percent_PM","rev","rev_per_min")
+corr5_cols = c("percent_AM_PM_delta","n_tot","temp","avg","rev_per_min")
+```
+
+# Data transformation/features engineering/imputation
+
+Next, we enhance the data quality by performing various data transformations. We identify and impute missing values, sort ordinal values, derive seasons from months, and identify long weekends, among other enhancements.
+
+```{r echo=FALSE}
+#Add Chike's data transformation here. Overwrite df_main with this dataset
+df_main <- df_main %>% mutate(
+              holiday = factor(holiday),
+              mem = factor(mem),
+              mm = factor(mm),
+              station = factor(station),
+              wday_ordered = factor(wday, levels = c("Monday", "Tuesday", "Wednesday",  "Thursday", "Friday", "Saturday", "Sunday"),ordered = TRUE),
+              season = ifelse((mm %in% c(12,1,2)), 'Winter',
+                       ifelse((mm %in% c(3,4,5)), 'Spring',
+                       ifelse((mm %in% c(6,7,8)), 'Summer',
+                       ifelse((mm %in% c(9,10,11)), 'Fall','No Season')))),
+              
+              rev_per_min = rev/dur,
+              rev_per_trip = rev/n_tot,
+             
+              percent_AM = n_AM/n_tot,
+              percent_PM = n_PM/n_tot,
+              
+              percent_AM_PM_delta = percent_AM - percent_PM,
+              n_AM_PM_delta = n_AM - n_PM,
+              
+              am_pm_ind = ifelse(n_AM>=n_PM, 'AM','PM'),
+                
+              wknd_ind = ifelse((wday %in% c("Sunday","Saturday")), 'Weekend'
+                        ,ifelse((wday %in% c("Friday","Monday") & holiday=='1'),'Long Weekend','Weekday')))
+        
+ 
+```
+
+# Univariate exploration
+
+Let’s begin by exploring our dataset variable by variable.
+
+## Interest variables
+
+Our study aims to better understand three main components of the Bixi system: trip duration, revenue generation, and everyday’s usage. Thus, we will start by exploring these variables individually.
+
+### Distribution of average duration
+
+```{r echo=FALSE}
+par(mfrow=c(1,2))
+hist(df_main$avg, main = "Average duration distribution", xlab = " average duration",breaks = 20)
+boxplot(df_main$avg,horizontal=F,main="Average duration")
+```
+
+Observations:
+
+The average trip duration is less skewed than the total duration. It’s important to note that only short trips under 60 minutes are represented in the dataset. The mean of average trip duration is around **15 minutes** and median **14 minutes**.
+
+It would be intriguing to investigate the relationship between trip duration and weather, as well as weekday versus weekend.
+
+### Distribution of revenue
+
+```{r echo=FALSE}
+par(mfrow=c(1,2))
+hist(df_main$rev, main = "Revenue distribution", xlab = "revenue",breaks = 40)
+boxplot(df_main$rev,horizontal=F,main="Revenue")
+```
+
+Observations:
+
+The revenue distribution is also asymmetric and skewed to the right, as expected. It has a median of **18 dollars** and mean of **28 dollars** for a specific station on a specific day.
+
+It would be intriguing to investigate if some stations or days generate more revenue.
+
+### Distribution of number of trips
+
+```{r echo=FALSE}
+par(mfrow=c(1,2))
+hist(df_main$n_tot, main = "Number of trips distribution", xlab = "trips",breaks = 40)
+boxplot(df_main$n_tot,horizontal=F,main="Number of trips")
+```
+
+Observations:
+
+The distribution shape of the number of trips is highly similar to that of the duration. It has a mean of **20 trips per day** for a station and a median of **11 trips**. The maximum value is **316 trips**.
+
+It would be intriguing to investigate if there are more trips at certain stations, if they occur more frequently in the morning or afternoon, and if members use the system more than non-members.
+
+Most of our variables of interest would require a log transformation if used as target variables in a regression framework.
+
+## Support variables
+
+Now that we have a good understanding of the distribution of our interest variables, let’s ensure we have a basic understanding of our support variables.
+
+### Stations
+
+How many station is there in the dataset and how often do they appear on average?
+
+```{r echo=FALSE}
+length(unique(df_main$station))
+mean(table(df_main$station))
+```
+
+Observations:
+
+Given that there are over 700 stations in the dataset, it would be more effective to group them into subgroups based on their respective regions.
+
+Each station occur on average 12 times in our dataset.
+
+### Membership
+
+Is the number of rows for member and non-member roughly equal?
+
+```{r echo=FALSE}
+table(df_main$mem)
+```
+
+Observations:
+
+Our hypothesis was that there would be one row for members and one row for non-members per station per day, resulting in an equal representation of members and non-members. Our analysis found that this hypothesis was roughly correct.
+
+### Time of day
+
+Are there more trips in the morning or afternoon?
+
+```{r echo=FALSE}
+sum(df_main$n_AM)
+sum(df_main$n_PM)
+```
+
+Observations:
+
+In our dataset, the number of trips in the afternoon is nearly **three times** greater than in the morning.
+
+### Temperature
+
+We know that temperature ranges between 0 and 28 degree Celsius with mean and median around 17. This makes sense since the month interval is between April and November inclusively.
+
+How often does it rain and when it does, what is the mean precipitation?
+
+```{r echo=FALSE}
+mean(df_main$rain != 0)
+mean(df_main$rain[df_main$rain != 0])
+```
+
+Observations:
+
+In our dataset, **38%** of the observations indicate the presence of rain, and when it does rain, the average precipitation is approximately **5mm**.
+
+# Bivariate exploration
+
+Now that we have a good idea of what each variable is like, let’s explore how the interest variables are affected by each other and by our support variables. Our goal is to understand the factors that may affect our variables of interest.
+
+# Revenue exploration
+
+Let’s begin our exploration with revenue.
+
+## Revenue in function of time
+
+The relationship between revenue and the time of the day, week, or year is not so intuitive. One could wonder if Bixi generates more revenue when people are on vacation and use Bixi for leisure or when they go to work and use it for transportation. It’s important to keep in mind that in our dataset, revenue is only generated by non-members.
+
+### Revenue in function of months
+
+```{r warning=FALSE, message = FALSE, echo=FALSE}
+# Filter the data for non-members (where mem == 0)
+non_members_data <- df_main %>%
+  filter(mem == 0)
+
+# Calculate the total
+revenue_by_month <- non_members_data %>%
+  group_by(mm) %>%
+  summarise(total_revenue = sum(rev))
+revenue_by_month$mm <- as.numeric(revenue_by_month$mm)
+revenue_by_month$total_revenue <- as.numeric(revenue_by_month$total_revenue)
+
+# Create a new data frame with 'lead' values for graph layout
+revenue_by_month <- revenue_by_month %>%
+  arrange(mm) %>%
+  mutate(lead_mm = lead(mm),
+         lead_total_revenue = lead(total_revenue))
+
+# Create the graph 
+revenue_month = ggplot() +
+  geom_segment(data = revenue_by_month, 
+               aes(x = mm, y = total_revenue, xend = lead_mm, yend = lead_total_revenue, color = total_revenue),
+               size = 1) +
+  geom_point(data = revenue_by_month, aes(x = mm, y = total_revenue, color = total_revenue), size = 3) +
+  labs(
+    title = "Total Revenue by Month (Non-Members)",
+    x = "Month",
+    y = "Total Revenue"
+  ) +
+  scale_x_continuous(
+    breaks = 4:11,
+    labels = c("April", "May", "June", "July", "August", "September", "October", "November")
+  ) +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16)
+  )
+
+revenue_month
+
+```
+
+Observations:
+
+There is here strong evidence of seasonal trends. Peaks in revenue coincide with warmer months (June to October).
+
+### Revenue in function of holiday
+
+```{r echo=FALSE}
+rev_holiday = ggplot(df_main, aes(x = wknd_ind, y = rev)) +
+  geom_boxplot(aes(fill = wknd_ind)) +  
+  labs(
+    title = "Revenue by Day Category",
+    x = "Day Category",
+    y = "Revenue"
+  ) +
+  scale_fill_manual(values = c("Weekend" = "#3498db", "Long Weekend" = "#e74c3c", "Weekday" = "#2ecc71")) +  # Custom color scheme
+  theme_bw() 
+
+rev_holiday 
+```
+
+Observations:
+
+We can observe here that the median revenue is noticeably higher during week-ends than during weekdays. This is not surprising because people generally go outside to do some activities during weekend, given the fact that they are working during weekdays. The interesting point here is that, even long week-ends are more profitable than weekdays, they are less profitable than regular week-ends. This need further exploration but it could be explained by the fact that people are generally going on holidays-trips during long week ends and consequently, are not Montreal.
+
+# Duration exploration
+
+Let’s see how duration is affected by different factors.
+
+## Duration in function of membership
+
+```{r echo=FALSE}
+duration_membership = ggplot(df_main, aes(x = factor(mem, labels = c("Non-member", "Member")), y = avg, fill = factor(mem, labels = c("Non-member", "Member")))) + 
+  geom_boxplot() +  
+  labs(
+    title = "Trip Duration Comparison: Members vs. Non-Members",
+    x = "Member Status",
+    y = "Average Trip Duration (minutes)"
+  ) +
+  scale_fill_manual(values = c("Non-member" = "blue", "Member" = "red")) +  # Manual color scheme
+  theme_bw() 
+
+# Display the graph
+duration_membership
+```
+
+Observations:
+
+This graph reveals disparities in trip duration between members and non-members. The data indicate that non-members generally engage in longer trips compared to our membership base. Moreover, the frequency of outliers (exceptionally long trips) is notably higher among non-members.
+
+## Duration in function of station
+
+```{r echo=FALSE}
+# Filter top and bottom 10 stations based on average duration
+top_bottom_stations <- df_main %>%
+  group_by(station, name) %>%
+  summarise(avg_duration = mean(avg, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(avg_duration) %>%
+  slice(c(1:10, (n() - 9):n()))
+
+# Calculate the overall average duration
+overall_avg_duration <- mean(top_bottom_stations$avg_duration, na.rm = TRUE)
+
+# Plot with gradient coloring and station names
+ggplot(top_bottom_stations, aes(x = reorder(name, avg_duration), y = avg_duration, fill = avg_duration)) +
+  geom_bar(stat = 'identity') +
+  geom_hline(yintercept = overall_avg_duration, color = "black", linetype = "dashed", size = 1) +
+  coord_flip() +
+  labs(
+    title = "Average Trip Duration by Station: Top and Bottom 10",
+    x = "Station Name",
+    y = "Average Duration"
+  ) +
+  scale_fill_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  annotate("text", x = Inf, y = overall_avg_duration, label = paste("Overall Avg: ", round(overall_avg_duration, 2)), vjust = -1.5, hjust = 1)
+```
+
+Observations:
+
+Given the fact that there are more than 600 stations, we did only observed extreme values and the mean of all stations. The graph shows that the average duration is around 22 min, with the duration of the lowest stations being slightly under 10 min and the duration of the highest stations being around 30 min. This need deeper exploration to see if the lowest stations are in highly concentrated district and if the highest stations are in more distant places.
+
+## Duration in function of weather
+
+### Duration in function of temperature/Rain
+
+```{r echo=FALSE}
+duration_weather = ggplot(df_main, aes(x = temp, y = avg)) + geom_point(aes(color = rain)) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Trip Duration vs. Temperature and Rainfall", x =
+         "Temperature (°C)", y = "Trip Duration (minutes)") +
+  scale_color_gradient(low = "blue", high = "red") 
+
+duration_weather
+```
+
+Observations:
+
+Our analysis reveals a positive correlation between trip duration and temperature. While the relationship appears to be somewhat weak, it is nonetheless evident. Additionally, we observed that rainy days tend to have less extreme trip durations compared to sunny days—an outcome that aligns with general expectations.
+
+## Duration in function of time
+
+### Duration in function of months
+
+```{r echo=FALSE}
+# Calculate the average trip duration for each month 
+avg_duration_by_month <- df_main %>%
+  group_by(mm) %>%
+  summarise(avg_duration = mean(avg))
+avg_duration_by_month$mm <- as.numeric(avg_duration_by_month$mm)
+
+# Create a line plot to visualize the average trip duration by month
+duration_month = ggplot(avg_duration_by_month, aes(x = mm, y = avg_duration, color = avg_duration)) +
+  geom_line(size = 1) + 
+  geom_point(size = 3) +
+  scale_color_gradient(low = "blue", high = "red") +  # Apply color gradient
+  labs(
+    title = "Average Trip Duration by Month", 
+    x = "Month", 
+    y = "Average Trip Duration (minutes)"
+  ) +
+  scale_x_continuous(
+    breaks = 4:11, 
+    labels = c("April", "May", "June", "July", "August", "September", "October", "November")
+  ) +
+  theme_bw() +  # Use a black and white theme
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(face = "bold")
+  )
+
+# Show the graph
+duration_month
+```
+
+Observations:
+
+The analysis demonstrates a noticeable yet subtle declining trend in average trip duration from April through November. While the trend is consistent, it's crucial to note that the variations are confined within a range of approximately 13 to 17 minutes—a span that may not be significant from an operational or customer experience standpoint.
+
+# Exploration of the number of trips
+
+## Number of trips in function of time
+
+### Average number of trips in function of day of the week and membership
+
+```{r echo=FALSE}
+ggplot(data = df_main, aes(x = wday_ordered, y = n_tot, fill = factor(mem))) +
+  stat_summary(fun = "mean", geom = "bar", position = "dodge") +
+  scale_fill_manual(values = c("0" = "blue", "1" = "red"), name = "Membership Status", labels = c("Non-member", "Member")) +  # Manual color scheme with legend name
+  labs(
+    title = "Average Number of Trips by Day of the Week and Membership Status",
+    x = "Day of the Week",
+    y = "Average Number of Trips"
+  ) +
+  theme_bw() +
+  theme(
+    axis.title = element_text(face = "bold"),
+    legend.position = "top"
+  )
+```
+
+Observations:
+
+This is a fascinating observation. The graph indicates that members and non-members have different usage patterns. Firstly, members account for a significantly larger proportion of Bixi usage than non-members. Secondly, members tend to use Bixi more frequently during weekdays for commuting, while non-members use it more during weekends for leisure activities. It is possible that non-members use Bixi for weekend outings or leisure, while members use it for frequent commuting.
+
+### Number of trips in function of time of the day and location
+
+```{r echo=FALSE}
+median_latitude <- median(df_main$latitude, na.rm = TRUE)  # added na.rm = TRUE to ignore NAs
+
+# Create categories
+df_main$category <- ifelse(df_main$latitude < median_latitude, "North Departure", "South Departure")
+
+# Create bar plot
+ggplot(data = df_main, aes(x = category, y = n_tot, fill = am_pm_ind)) +
+  stat_summary(fun = "mean", geom = "bar", position = "dodge") +
+  scale_fill_manual(values = c("AM" = "blue", "PM" = "red"), name = "Time of Day") +  # Manual color scheme with legend name
+  labs(
+    title = "Average Number of Trips by Geographic Departure and Time of Day",
+    x = "Geographic Departure",
+    y = "Average Number of Trips"
+  ) +
+  theme_bw() +
+  theme(
+    axis.title = element_text(face = "bold"),
+    legend.position = "top"
+  )
+```
+
+Observations:
+
+Our analysis reveals fascinating insights. On average, Bixi bikes are utilized significantly more in the afternoon compared to the morning. In the morning, there appears to be a higher number of departures from the south side of the city, while in the afternoon, the trend is reversed. This could suggest that Bixi user are more located on the south side of the city.
+
+# Conclusion:
+
+Here is a summary of the findings:
+
+- **Weather**: The analysis suggests that weather does not have a significant impact on Bixi usage.
+- **Duration**: The duration of Bixi trips varies depending on the station.
+- **Revenue**: Bixi revenue fluctuates over the course of the month.
+- **Membership**: Most Bixi usage is attributed to members.
+- **Usage Patterns**: Members tend to use Bixi more during weekdays, while non-members use it more during weekends.
+- **Flow**: There appears to be a higher flow of Bixi trips from the south of the city to the north in the morning, and the opposite pattern in the afternoon.
+
+These insights provide valuable information about Bixi usage patterns and can help inform decision-making processes.
+
+# Contribution
+
+Charles Julien : Did univariate analysis as well as number of trip analysis and text structure.
+
+Gabriel : Did part of bivariate exploration and page layout.
+
+Chike Odenigbo: Did summary statistics, missing variable analysis, feature engineering and correlation plots (excluded due to page limit)
+
+Atul Sharma: Did part of Bivariate analysis.
